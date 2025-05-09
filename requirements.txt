@@ -1,4 +1,4 @@
 fastapi
 uvicorn[standard]
-moviepy
+moviepy==1.0.3     # pin so moviepy.editor import works
 imageio[ffmpeg]
