@@ -1,37 +1,55 @@
-# main.py – FastAPI-Backend mit CORS & MoviePy 1.0.3
-import os, uuid, tempfile, requests
+# main.py – FastAPI-Backend mit CORS, MoviePy & explizitem Preflight für /render
+
+import os
+import uuid
+import tempfile
+import requests
 from io import BytesIO
 
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import Response
 
-from moviepy.editor import (
-    ImageClip, AudioFileClip, concatenate_videoclips, vfx
-)
+from moviepy.editor import ImageClip, AudioFileClip, concatenate_videoclips, vfx
 
-# ─── 1) FastAPI + CORS ────────────────────────────────────────────────
-TMP_DIR = tempfile.gettempdir()
+# ─── 1) FastAPI-Instanz ────────────────────────────────────────────────
 app = FastAPI()
 
-# Erlaube Cross-Origin (OPTION jeder Domain, alle Methoden/Header)
+# ─── 2) Preflight-Handler für CORS auf /render ─────────────────────────
+@app.options("/render")
+async def preflight_render() -> Response:
+    return Response(
+        status_code=204,
+        headers={
+            "Access-Control-Allow-Origin":  "*",
+            "Access-Control-Allow-Methods": "POST,OPTIONS",
+            "Access-Control-Allow-Headers": "*",
+        },
+    )
+
+# ─── 3) Globale CORS-Middleware ─────────────────────────────────────────
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],          # oder z.B. ["https://creator.zerowork.io"]
+    allow_origins=["*"],       # oder ["https://creator.zerowork.io"]
     allow_methods=["*"],
     allow_headers=["*"],
-    allow_credentials=True
+    allow_credentials=True,
 )
 
+# ─── 4) Statische Auslieferung ───────────────────────────────────────────
+TMP_DIR = tempfile.gettempdir()   # Render: /tmp
 app.mount("/static", StaticFiles(directory=TMP_DIR), name="static")
 
-# ─── 2) Hilfs-Funktion Image→Clip ───────────────────────────────────────
+# ─── 5) Bild-URL → ImageClip Helfer ────────────────────────────────────
 def image_url_to_clip(url: str, duration: float = 3.0) -> ImageClip:
+    """Lädt ein Bild von URL, wandelt es in einen MoviePy-Clip um."""
     try:
         resp = requests.get(url, timeout=20)
         resp.raise_for_status()
     except requests.RequestException as exc:
         raise HTTPException(400, f"Failed to download image: {url} ({exc})")
+
     from PIL import Image
     import numpy as np
 
@@ -39,7 +57,7 @@ def image_url_to_clip(url: str, duration: float = 3.0) -> ImageClip:
     frame = np.array(img)
     return ImageClip(frame).set_duration(duration)
 
-# ─── 3) Endpoint POST /render ──────────────────────────────────────────
+# ─── 6) POST /render Endpoint ──────────────────────────────────────────
 @app.post("/render")
 async def render_video(req: Request):
     data = await req.json()
@@ -47,19 +65,19 @@ async def render_video(req: Request):
     if not images:
         raise HTTPException(400, "'images' list is missing")
 
-    # 1) ImageClips bauen
+    # 6.1) ImageClips bauen
     clips = []
     for entry in images:
         if isinstance(entry, str):
-            url, dur = entry, 3
+            url, dur = entry, 3.0
         elif isinstance(entry, dict):
             url = entry.get("url")
-            dur = float(entry.get("duration", 3))
+            dur = float(entry.get("duration", 3.0))
         else:
             raise HTTPException(400, f"Invalid image entry: {entry}")
         clips.append(image_url_to_clip(url, dur))
 
-    # 2) Cross-Fade 0.5 s
+    # 6.2) 0.5 s Cross-Fade zwischen den Clips
     video = concatenate_videoclips(
         clips,
         method="compose",
@@ -67,12 +85,12 @@ async def render_video(req: Request):
         transition=vfx.fadein(clips[0], 0.5)
     )
 
-    # 3) optional Audio
+    # 6.3) Optionale Hintergrund-Musik
     if data.get("audio"):
         audio_clip = AudioFileClip(data["audio"]).subclip(0, video.duration)
         video = video.set_audio(audio_clip.volumex(0.4))
 
-    # 4) Video schreiben
+    # 6.4) Video in TMP_DIR schreiben
     outname = f"video_{uuid.uuid4().hex[:8]}.mp4"
     outpath = os.path.join(TMP_DIR, outname)
     video.write_videofile(
@@ -85,5 +103,5 @@ async def render_video(req: Request):
     )
     video.close()
 
-    # 5) URL zurück
+    # 6.5) Download-URL zurückgeben
     return {"url": f"/static/{outname}"}
